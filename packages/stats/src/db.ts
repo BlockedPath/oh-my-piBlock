@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
-import type { Usage } from "@oh-my-pi/pi-ai";
+import type { StopReason, Usage } from "@oh-my-pi/pi-ai";
 import type { GeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { getConfigRootDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
@@ -32,6 +32,77 @@ interface CostBackfillRow {
 	output_tokens: number;
 	cache_read_tokens: number;
 	cache_write_tokens: number;
+}
+
+interface AggregatedStatsRow {
+	total_requests: number | null;
+	failed_requests: number | null;
+	total_input_tokens: number | null;
+	total_output_tokens: number | null;
+	total_cache_read_tokens: number | null;
+	total_cache_write_tokens: number | null;
+	total_premium_requests: number | null;
+	total_cost: number | null;
+	avg_duration: number | null;
+	avg_ttft: number | null;
+	avg_tokens_per_second: number | null;
+	first_timestamp: number | null;
+	last_timestamp: number | null;
+}
+
+interface ModelStatsRow extends AggregatedStatsRow {
+	model: string;
+	provider: string;
+}
+
+interface FolderStatsRow extends AggregatedStatsRow {
+	folder: string;
+}
+
+interface TimeSeriesRow {
+	bucket: number;
+	requests: number;
+	errors: number | null;
+	tokens: number | null;
+	cost: number | null;
+}
+
+interface CostTimeSeriesRow {
+	bucket: number;
+	model: string;
+	provider: string;
+	cost: number | null;
+	cost_input: number | null;
+	cost_output: number | null;
+	cost_cache_read: number | null;
+	cost_cache_write: number | null;
+	requests: number;
+}
+
+interface MessageStatsRow {
+	id: number;
+	session_file: string;
+	entry_id: string;
+	folder: string;
+	model: string;
+	provider: string;
+	api: string;
+	timestamp: number;
+	duration: number | null;
+	ttft: number | null;
+	stop_reason: string;
+	error_message: string | null;
+	input_tokens: number;
+	output_tokens: number;
+	cache_read_tokens: number;
+	cache_write_tokens: number;
+	total_tokens: number;
+	premium_requests: number | null;
+	cost_input: number;
+	cost_output: number;
+	cost_cache_read: number;
+	cost_cache_write: number;
+	cost_total: number;
 }
 
 let db: Database | null = null;
@@ -363,7 +434,7 @@ export function insertMessageStats(stats: MessageStats[]): number {
 /**
  * Build aggregated stats from query results.
  */
-function buildAggregatedStats(rows: any[]): AggregatedStats {
+function buildAggregatedStats(rows: AggregatedStatsRow[]): AggregatedStats {
 	if (rows.length === 0) {
 		return {
 			totalRequests: 0,
@@ -442,8 +513,8 @@ export function getOverallStats(cutoff?: number): AggregatedStats {
 		${hasCutoff ? "WHERE timestamp >= ?" : ""}
 	`);
 
-	const rows = hasCutoff ? stmt.all(cutoff) : stmt.all();
-	return buildAggregatedStats(rows as any[]);
+	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as AggregatedStatsRow[];
+	return buildAggregatedStats(rows);
 }
 /**
  * Get stats grouped by model.
@@ -475,7 +546,7 @@ export function getStatsByModel(cutoff?: number): ModelStats[] {
 		ORDER BY total_requests DESC
 	`);
 
-	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as any[];
+	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as ModelStatsRow[];
 	return rows.map(row => ({
 		model: row.model,
 		provider: row.provider,
@@ -512,7 +583,7 @@ export function getStatsByFolder(cutoff?: number): FolderStats[] {
 		ORDER BY total_requests DESC
 	`);
 
-	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as any[];
+	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as FolderStatsRow[];
 	return rows.map(row => ({
 		folder: row.folder,
 		...buildAggregatedStats([row]),
@@ -541,15 +612,15 @@ export function getTimeSeries(hours = 24, cutoff?: number | null, bucketMs = 60 
 		ORDER BY bucket ASC
 	`);
 
-	const rows = hasCutoff
-		? (stmt.all(bucketMs, bucketMs, seriesCutoff) as any[])
-		: (stmt.all(bucketMs, bucketMs) as any[]);
+	const rows = (
+		hasCutoff ? stmt.all(bucketMs, bucketMs, seriesCutoff) : stmt.all(bucketMs, bucketMs)
+	) as TimeSeriesRow[];
 	return rows.map(row => ({
 		timestamp: row.bucket,
 		requests: row.requests,
-		errors: row.errors,
-		tokens: row.tokens,
-		cost: row.cost,
+		errors: row.errors ?? 0,
+		tokens: row.tokens ?? 0,
+		cost: row.cost ?? 0,
 	}));
 }
 
@@ -657,7 +728,20 @@ export function closeDb(): void {
 	}
 }
 
-function rowToMessageStats(row: any): MessageStats {
+function normalizeStopReason(value: string): StopReason {
+	switch (value) {
+		case "stop":
+		case "length":
+		case "toolUse":
+		case "error":
+		case "aborted":
+			return value;
+		default:
+			return "error";
+	}
+}
+
+function rowToMessageStats(row: MessageStatsRow): MessageStats {
 	return {
 		id: row.id,
 		sessionFile: row.session_file,
@@ -669,7 +753,7 @@ function rowToMessageStats(row: any): MessageStats {
 		timestamp: row.timestamp,
 		duration: row.duration,
 		ttft: row.ttft,
-		stopReason: row.stop_reason as any,
+		stopReason: normalizeStopReason(row.stop_reason),
 		errorMessage: row.error_message,
 		usage: {
 			input: row.input_tokens,
@@ -696,7 +780,7 @@ export function getRecentRequests(limit = 100): MessageStats[] {
 		ORDER BY timestamp DESC 
 		LIMIT ?
 	`);
-	return (stmt.all(limit) as any[]).map(rowToMessageStats);
+	return (stmt.all(limit) as MessageStatsRow[]).map(rowToMessageStats);
 }
 
 export function getRecentErrors(limit = 100): MessageStats[] {
@@ -707,13 +791,13 @@ export function getRecentErrors(limit = 100): MessageStats[] {
 		ORDER BY timestamp DESC 
 		LIMIT ?
 	`);
-	return (stmt.all(limit) as any[]).map(rowToMessageStats);
+	return (stmt.all(limit) as MessageStatsRow[]).map(rowToMessageStats);
 }
 
 export function getMessageById(id: number): MessageStats | null {
 	if (!db) return null;
 	const stmt = db.prepare("SELECT * FROM messages WHERE id = ?");
-	const row = stmt.get(id);
+	const row = stmt.get(id) as MessageStatsRow | undefined;
 	return row ? rowToMessageStats(row) : null;
 }
 
@@ -743,16 +827,16 @@ export function getCostTimeSeries(days = 90, cutoff?: number | null): CostTimeSe
 		ORDER BY bucket ASC
 	`);
 
-	const rows = hasCutoff ? (stmt.all(seriesCutoff) as any[]) : (stmt.all() as any[]);
+	const rows = (hasCutoff ? stmt.all(seriesCutoff) : stmt.all()) as CostTimeSeriesRow[];
 	return rows.map(row => ({
 		timestamp: row.bucket,
 		model: row.model,
 		provider: row.provider,
-		cost: row.cost,
-		costInput: row.cost_input,
-		costOutput: row.cost_output,
-		costCacheRead: row.cost_cache_read,
-		costCacheWrite: row.cost_cache_write,
+		cost: row.cost ?? 0,
+		costInput: row.cost_input ?? 0,
+		costOutput: row.cost_output ?? 0,
+		costCacheRead: row.cost_cache_read ?? 0,
+		costCacheWrite: row.cost_cache_write ?? 0,
 		requests: row.requests,
 	}));
 }

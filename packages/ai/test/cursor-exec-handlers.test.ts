@@ -1,13 +1,15 @@
 import { describe, expect, it } from "bun:test";
+import { create } from "@bufbuild/protobuf";
 import {
 	buildCursorHistoryForTest,
 	buildCursorSystemPromptJsons,
+	normalizeCursorShellArgs,
 	resolveExecHandler,
 	streamCursor,
 } from "@oh-my-pi/pi-ai/providers/cursor";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import type { AgentRunRequest } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
+import { type AgentRunRequest, ShellArgsSchema } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
 
 const cursorModel: Model<"cursor-agent"> = buildModel({
 	id: "cursor-composer-2.5",
@@ -129,6 +131,17 @@ describe("Cursor resolveExecHandler execHandlers binding", () => {
 
 		// Should get error result (handler threw accessing undefined.sentinel)
 		expect(execResult).toEqual({ tag: "error", message: expect.any(String) });
+	});
+});
+
+describe("Cursor shell args normalization", () => {
+	it("fills omitted shell working directories before handler execution", () => {
+		const args = create(ShellArgsSchema, { command: "pwd", workingDirectory: "" });
+
+		const normalized = normalizeCursorShellArgs(args);
+
+		expect(normalized.command).toBe("pwd");
+		expect(normalized.workingDirectory).toBe(process.cwd());
 	});
 });
 

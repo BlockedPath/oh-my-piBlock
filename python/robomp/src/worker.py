@@ -551,26 +551,14 @@ def _run_rpc_blocking(
         extra_groups=["omp"] if inputs.slot_uid is not None else None,
     ) as client:
         # Arm cancellation: from this point the API can kill the omp subprocess
-        # out from under us, which makes `prompt_and_wait` raise an `RpcError`
-        # we'll let propagate. The `with` exit calls `client.stop()` again, but
-        # it's idempotent.
-        #
-        # NOTE: omp_rpc.RpcClient.stop() has a bug where it sets `_stopping=True`
-        # before the stdout reader loop notices the closed pipe, so the reader's
-        # `if not self._stopping` guard skips `_mark_closed()` entirely.
-        # `_wait_for_agent_end` then blocks on `_event_condition` until the hard
-        # timeout because `_closed_error` is never set. We work around it here
-        # by calling `_mark_closed()` ourselves after stop returns — this is
-        # idempotent (it no-ops when `_closed_error` is already set).
+        # out from under us, which makes `prompt_and_wait` raise an
+        # `RpcProcessExitError` we'll let propagate. `client.stop()` sets
+        # `_closed_error` itself (idempotently), which is what unblocks any
+        # thread parked in `_wait_for_agent_end`; no private-API nudge is
+        # needed. The `with` exit calls `client.stop()` again, but it's
+        # idempotent.
         def _cancel_hook() -> None:
-            try:
-                client.stop()
-            finally:
-                # Private API, but the only way to unblock `_wait_for_agent_end`
-                # without waiting for the request timeout. Idempotent.
-                client._mark_closed(  # noqa: SLF001
-                    RpcProcessExitError("cancelled by operator")
-                )
+            client.stop()
 
         if bindings.abort is not None:
             bindings.abort.stop = _cancel_hook
@@ -661,9 +649,7 @@ def _run_rpc_blocking(
                 stop_reason = turn.assistant_message.get("stopReason")
                 if stop_reason == "error":
                     error_msg = turn.assistant_message.get("errorMessage") or "model returned error"
-                    raise RuntimeError(
-                        f"omp agent error (stopReason=error): {error_msg}"
-                    )
+                    raise RuntimeError(f"omp agent error (stopReason=error): {error_msg}")
             log.info(
                 "rpc_done",
                 extra={

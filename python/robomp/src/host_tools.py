@@ -922,8 +922,15 @@ def _build_repro_record(bindings: ToolBindings) -> HostTool[Any, Any]:
             _raise_command("repro_record requires an integer 'exit_code'.")
         bindings.workspace.repro_dir.mkdir(parents=True, exist_ok=True)
         slug = "".join(c if c.isalnum() else "-" for c in title.lower()).strip("-")[:48] or "repro"
-        ts = int(time.time())
-        target = bindings.workspace.repro_dir / f"{ts}-{slug}.md"
+        # Second-resolution timestamps collide when the agent records two repros
+        # of the same title within the same second; disambiguate with a counter
+        # so neither record silently overwrites the other.
+        base = f"{int(time.time())}-{slug}"
+        target = bindings.workspace.repro_dir / f"{base}.md"
+        dup = 2
+        while target.exists():
+            target = bindings.workspace.repro_dir / f"{base}-{dup}.md"
+            dup += 1
         target.write_text(
             f"# {title}\n\n"
             f"- exit_code: {exit_code}\n"
