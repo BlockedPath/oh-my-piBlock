@@ -518,23 +518,22 @@ async def test_run_rpc_hard_timeout_stops_client_and_fails(
 
     fake = _FakeRpcClient.instances[0]
     assert fake.stop_calls == 1
-    # `_cancel_hook` (used by both manual cancel and hard timeout) MUST also call
-    # `_mark_closed` to unblock `_wait_for_agent_end` — `stop()` alone leaves
-    # `_closed_error` unset (omp_rpc bug), so the worker would hang otherwise.
-    assert len(fake.mark_closed_calls) == 1
-    from omp_rpc import RpcProcessExitError
-
-    assert isinstance(fake.mark_closed_calls[0], RpcProcessExitError)
+    # The cancel hook now relies on `client.stop()` alone — omp_rpc's stop()
+    # sets `_closed_error` itself (idempotently), which is what unblocks any
+    # thread parked in `_wait_for_agent_end`. The worker no longer pokes the
+    # private `_mark_closed`. `stop_calls == 1` because FiringTimer invokes the
+    # hook synchronously and the hard-timeout branch surfaces TimeoutError.
+    assert fake.mark_closed_calls == []
 
 
 @pytest.mark.asyncio
-async def test_run_rpc_cancel_hook_stops_and_marks_closed(
+async def test_run_rpc_cancel_hook_stops_client(
     tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The cancel hook registered with `register_cancel_hook` must call both
-    `client.stop()` AND `client._mark_closed()`. The latter is the workaround for
-    an upstream omp_rpc bug where `stop()` does not set `_closed_error`, leaving
-    `_wait_for_agent_end` blocked until timeout."""
+    """The cancel hook registered with `register_cancel_hook` must call
+    `client.stop()`. omp_rpc's `stop()` sets `_closed_error` itself (idempotently),
+    which is what unblocks `_wait_for_agent_end`; the worker relies on the public
+    `stop()` contract alone and never pokes the private `_mark_closed`."""
     captured: list = []
     monkeypatch.setattr("robomp.worker.register_cancel_hook", lambda hook: captured.append(hook))
     monkeypatch.setattr("robomp.worker.unregister_cancel_hook", lambda: None)
@@ -558,11 +557,9 @@ async def test_run_rpc_cancel_hook_stops_and_marks_closed(
     pre_stop = fake.stop_calls
     hook()  # Simulate the API/worker firing the cancel
     assert fake.stop_calls == pre_stop + 1
-    assert len(fake.mark_closed_calls) == 1
-    from omp_rpc import RpcProcessExitError
-
-    assert isinstance(fake.mark_closed_calls[0], RpcProcessExitError)
-    assert "cancelled by operator" in str(fake.mark_closed_calls[0])
+    # The worker must NOT reach into omp_rpc's private `_mark_closed`; the
+    # unblock now flows through the public `stop()` contract.
+    assert fake.mark_closed_calls == []
 
 
 class _ClassifiedRow:
