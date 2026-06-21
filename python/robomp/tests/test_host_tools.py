@@ -486,6 +486,35 @@ def test_repro_record_writes_transcript(db: Database, tmp_path: Path) -> None:
         _stop_loop(loop, t)
 
 
+def test_repro_record_same_title_same_second_does_not_overwrite(db: Database, tmp_path: Path) -> None:
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda r: httpx.Response(500)))
+    try:
+        tool = next(x for x in build(bindings) if x.name == "repro_record")
+        for command, output in (("bun test a.test.ts", "first"), ("bun test b.test.ts", "second")):
+            assert (
+                tool.execute(
+                    {
+                        "title": "panic on empty input",
+                        "command": command,
+                        "output": output,
+                        "exit_code": 1,
+                    },
+                    _ctx(),
+                )
+                == "recorded"
+            )
+        files = sorted(bindings.workspace.repro_dir.iterdir())
+        # Both records must survive even when the second-resolution timestamp and
+        # slug collide; the second write must not clobber the first. Two distinct
+        # directory entries (len == 2) proves the filenames did not collide.
+        assert len(files) == 2
+        bodies = {f.read_text() for f in files}
+        assert any("first" in b for b in bodies)
+        assert any("second" in b for b in bodies)
+    finally:
+        _stop_loop(loop, t)
+
+
 def test_repro_record_clears_needs_info_after_actionable_reply(db: Database, tmp_path: Path) -> None:
     removed: list[tuple[str, str]] = []
 
