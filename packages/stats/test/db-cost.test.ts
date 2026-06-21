@@ -127,4 +127,51 @@ describe("stats GPT cost correction", () => {
 		const request = getRecentRequests(1)[0];
 		expect(request?.usage.cost.total).toBeCloseTo(expectedCodexGptCost().total, 8);
 	});
+
+	it("normalizes unknown persisted stop reasons to error when reading requests", async () => {
+		await initDb();
+		closeDb();
+
+		const database = new Database(getStatsDbPath());
+		database
+			.prepare(`
+				INSERT INTO messages (
+					session_file, entry_id, folder, model, provider, api, timestamp,
+					duration, ttft, stop_reason, error_message,
+					input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, premium_requests,
+					cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`)
+			.run(
+				"/tmp/session.jsonl",
+				"invalid-stop-reason",
+				"/tmp/project",
+				"gpt-5.4",
+				"openai-codex",
+				"openai-codex-responses",
+				Date.now(),
+				1000,
+				100,
+				"provider_weird",
+				null,
+				1000,
+				500,
+				200,
+				0,
+				1700,
+				0,
+				0,
+				0,
+				0,
+				0,
+				0,
+			);
+		database.close();
+
+		await initDb();
+
+		const request = getRecentRequests(1)[0];
+		expect(request?.entryId).toBe("invalid-stop-reason");
+		expect(request?.stopReason).toBe("error");
+	});
 });

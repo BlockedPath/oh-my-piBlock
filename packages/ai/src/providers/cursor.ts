@@ -740,11 +740,11 @@ async function handleShellStreamArgs(
 	execHandlers: CursorExecHandlers | undefined,
 	onToolResult: CursorToolResultHandler | undefined,
 ): Promise<void> {
-	const normalizedWorkingDirectory = args.workingDirectory || process.cwd();
-	const normalizedArgs: ShellArgs = { ...args, workingDirectory: normalizedWorkingDirectory };
+	const normalizedArgs = normalizeCursorShellArgs(args);
+	const normalizedWorkingDirectory = normalizedArgs.workingDirectory;
 	const startTs = Date.now();
 	log("shellStream", "start", {
-		command: (args as any).command,
+		command: normalizedArgs.command,
 		workingDirectory: normalizedWorkingDirectory,
 		execId: execMsg.execId,
 		hasExecHandlers: !!execHandlers,
@@ -853,14 +853,12 @@ async function handleShellStreamArgs(
 	const handler = streamHandler ? (shellArgs: ShellArgs) => streamHandler(shellArgs, streamCallbacks) : batchHandler;
 
 	const { execResult } = await resolveExecHandler(
-		args as any,
+		normalizedArgs,
 		handler as typeof batchHandler,
 		onToolResult,
-		toolResult => buildShellResultFromToolResult(normalizedArgs as any, toolResult),
-		reason =>
-			buildShellRejectedResult((normalizedArgs as any).command, (normalizedArgs as any).workingDirectory, reason),
-		error =>
-			buildShellFailureResult((normalizedArgs as any).command, (normalizedArgs as any).workingDirectory, error),
+		toolResult => buildShellResultFromToolResult(normalizedArgs, toolResult),
+		reason => buildShellRejectedResult(normalizedArgs.command, normalizedArgs.workingDirectory, reason),
+		error => buildShellFailureResult(normalizedArgs.command, normalizedArgs.workingDirectory, error),
 	);
 
 	// When using the batch handler (no shellStream), send buffered stdout/stderr
@@ -881,6 +879,11 @@ async function handleShellStreamArgs(
 	sendExecClientStreamClose(h2Request, execMsg);
 
 	log("shellStream", "done", { elapsed: Date.now() - startTs });
+}
+
+/** Exported for tests: Cursor omits workingDirectory on some shell frames. */
+export function normalizeCursorShellArgs(args: ShellArgs): ShellArgs {
+	return { ...args, workingDirectory: args.workingDirectory || process.cwd() };
 }
 
 function sendShellStreamExitFromResult(
@@ -1105,9 +1108,9 @@ async function handleExecServerMessage(
 		}
 		case "shellArgs": {
 			const args = execMsg.message.value;
-			const normalizedArgs: ShellArgs = { ...args, workingDirectory: args.workingDirectory || process.cwd() };
+			const normalizedArgs = normalizeCursorShellArgs(args);
 			const { execResult } = await resolveExecHandler(
-				args,
+				normalizedArgs,
 				execHandlers?.shell?.bind(execHandlers),
 				onToolResult,
 				toolResult => buildShellResultFromToolResult(normalizedArgs, toolResult),
